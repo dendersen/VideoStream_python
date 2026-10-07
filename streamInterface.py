@@ -5,7 +5,7 @@ import threading
 import time
 
 class Frame:
-  def __init__(self, image:cv2.Mat):
+  def __init__(self, image:cv2.typing.MatLike | None):
     self.image = image
 
 class ImageStream:
@@ -15,11 +15,11 @@ class ImageStream:
     pass
   def connect(self) -> bool:
     pass
-  def disconnect(self) -> bool:
+  def disconnect(self):
     pass
 
 class ImageStream_Network(ImageStream):
-  def __init__(self, streamLink:str):
+  def __init__(self, streamLink:str, bufferSize:int = 10):
     self.currentVideoSource = None
     self.running = False
     self.shouldRun = False
@@ -27,6 +27,9 @@ class ImageStream_Network(ImageStream):
     self.streamLink = streamLink
     self.url = urlsplit(streamLink)
     self.waitTime = 5
+    placeholder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "placeholder.png")
+    self.frameBuffer = [Frame(cv2.imread(placeholder)) for _ in range(bufferSize)]
+    self.preloadThread = None
   
   def _preloadFrames(self):
     while self.shouldRun and self.running:
@@ -57,12 +60,26 @@ class ImageStream_Network(ImageStream):
       self.currentVideoSource.release() if self.currentVideoSource is not None else None
   
   def connect(self) -> bool:
-    self.frameBuffer = []
+    self.shouldRun = True
+    self.preloadThread = threading.Thread(target=self._preloadFrames)
+    self.preloadThread.start()
+    startWait = time.time()
+    while time.time() - startWait < (self.waitTime * 2):
+      if self.connected:
+        return True
+      time.sleep(0.1)
+    self.disconnect()
+    return False
+
+  def disconnect(self):
+    self.shouldRun = False
+    if self.preloadThread and self.preloadThread.is_alive():
+      self.preloadThread.join()
 
 
 class ImageStream_File(ImageStream):
   def __init__(self, filePath:str):
-    self.Wildcard = None if not filePath.endswith("*") else os.path.split(filePath)[1].removesuffix("*")
+    self.Wildcard = "" if not filePath.endswith("*") else os.path.split(filePath)[1].removesuffix("*")
     self.filePath = filePath
     
     if self.Wildcard:
@@ -74,16 +91,19 @@ class ImageStream_File(ImageStream):
     if not os.path.isdir(self.filePath) and self.Wildcard:
       raise Exception(f"File path {self.filePath} is not a directory, but wildcard is set")
     
-    self.filePath = os.path.split(filePath)[0]
+    self.files = self._FindFiles(os.path.join(self.filePath, self.Wildcard) if self.Wildcard else self.filePath)
     
-    self.files = self._FindFiles(os.path.join(self.filePath, self.Wildcard))
+    self.currentVideoSource = None
+    self.videoSource = None
+    self.fileIndex = None
+    
     self.disconnect()
   
   def _FindFiles(self, filePath:str) -> list[str]:
     if self.Wildcard:
       valid = []
-      files = os.listdir(os.join(filePath))
-      foundFiles = [os.join(filePath, f) for f in files if f.startswith(self.filePath)]
+      files = os.listdir(os.path.join(filePath))
+      foundFiles = [os.path.join(filePath, f) for f in files if f.startswith(self.Wildcard)]
       for f in foundFiles:
         if os.path.isdir(f):
           valid += self._FindFiles(f)
@@ -97,7 +117,7 @@ class ImageStream_File(ImageStream):
       self.fileIndex += 1
       if self.fileIndex >= len(self.videoSource):
         return None
-      self.currentVideoSource = cv2.videoCapture(self.videoSource[self.fileIndex])
+      self.currentVideoSource = cv2.VideoCapture(self.videoSource[self.fileIndex])
       if not self.currentVideoSource.isOpened():
         self.currentVideoSource.release()
         return self.getFrame(count)
@@ -146,6 +166,9 @@ class StreamReader:
     else:
       self.stream = ImageStream_Network(streamLink)
       raise Exception("Stream type not supported yet")
+  
+  def start(self) -> bool:
+    return self.stream.connect()
   
   def stop(self):
     self.stream.disconnect()
