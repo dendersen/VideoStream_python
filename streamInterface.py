@@ -91,7 +91,7 @@ class ImageStream_File(ImageStream):
     if not os.path.isdir(self.filePath) and self.Wildcard:
       raise Exception(f"File path {self.filePath} is not a directory, but wildcard is set")
     
-    self.files = self._FindFiles(os.path.join(self.filePath, self.Wildcard) if self.Wildcard else self.filePath)
+    self.files = self._FindFiles(self.filePath if self.Wildcard else self.filePath)
     
     self.currentVideoSource = None
     self.videoSource = None
@@ -102,7 +102,7 @@ class ImageStream_File(ImageStream):
   def _FindFiles(self, filePath:str) -> list[str]:
     if self.Wildcard:
       valid = []
-      files = os.listdir(os.path.join(filePath))
+      files = os.listdir(filePath.removesuffix(self.Wildcard))
       foundFiles = [os.path.join(filePath, f) for f in files if f.startswith(self.Wildcard)]
       for f in foundFiles:
         if os.path.isdir(f):

@@ -1,19 +1,27 @@
+
+
 if __name__ == "__main__":
   from streamInterface import StreamReader
-  from tkinter import Tk
-  from tkinter.filedialog import askopenfilename
-  
+  import os.path as path
   from cv2 import imshow, waitKey
-  
-  Tk().withdraw() # we don't want a full GUI, so keep the root window from appearing
-  filename = askopenfilename() # show an "Open" dialog box and return the path to the selected file
-  print(f"Selected file: {filename}")
-  stream = StreamReader(filename, StreamReader.STREAM_TYPE_FILE)
-  print("Starting stream...")
-  stream.start()
-  for i in range(10):
-    frames = stream.getFrames(1,True)
-    print(f"Got {len(frames) if frames is not None else 0} frames")
-    if frames is not None and len(frames) > 0:
-      imshow("Frame", frames[0].image)
-      waitKey(100)
+  import time
+  def displayTest(target:str):
+    import os.path as path
+    stream = StreamReader(path.join(source,target), StreamReader.STREAM_TYPE_FILE)
+    stream.start()
+    noFrame = 0
+    while True:
+      frames = stream.getFrames(1,True)
+      if frames is not None and len(frames) > 0:
+        imshow("Frame", frames[0].image)
+        waitKey(100)
+      else:
+        time.sleep(.1)
+        noFrame += 1
+        if noFrame > 10:
+          break
+  source = path.abspath(__file__)
+  source = path.split(source)[0]
+  displayTest("placeholder_0.png")
+  displayTest("placeholder_2.mp4")
+  displayTest("placeholder*")
