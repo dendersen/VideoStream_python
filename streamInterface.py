@@ -1,8 +1,12 @@
 import cv2
 import os
+from collections import deque
 from urllib.parse import urlsplit
 import threading
 import time
+
+# TCP avoids losing fragments when full-resolution frames exceed UDP receiver throughput.
+os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
 
 class Frame:
   def __init__(self, image:cv2.typing.MatLike | None):
@@ -27,8 +31,9 @@ class ImageStream_Network(ImageStream):
     self.streamLink = streamLink
     self.url = urlsplit(streamLink)
     self.waitTime = 5
-    placeholder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "placeholder.png")
-    self.frameBuffer = [Frame(cv2.imread(placeholder)) for _ in range(bufferSize)]
+    self.frameBuffer = deque(maxlen=max(1, bufferSize))
+    self.frameCondition = threading.Condition()
+    self.streamInfo: dict[str, int | float | str] = {}
     self.preloadThread = None
   
   def _preloadFrames(self):
@@ -51,8 +56,19 @@ class ImageStream_Network(ImageStream):
       
       ready, frame = self.currentVideoSource.read()
       if ready:
-        self.connected = True
-        self.frameBuffer.append(Frame(frame))
+        fourcc = int(self.currentVideoSource.get(cv2.CAP_PROP_FOURCC))
+        codec = "".join(chr((fourcc >> (8 * index)) & 0xff) for index in range(4)).strip()
+        fps = float(self.currentVideoSource.get(cv2.CAP_PROP_FPS))
+        with self.frameCondition:
+          self.connected = True
+          self.streamInfo = {
+            "width": int(frame.shape[1]),
+            "height": int(frame.shape[0]),
+            "fps": fps,
+            "codec": codec or "unknown",
+          }
+          self.frameBuffer.append(Frame(frame))
+          self.frameCondition.notify_all()
       else:
         time.sleep(0.01)
     
@@ -60,6 +76,10 @@ class ImageStream_Network(ImageStream):
       self.currentVideoSource.release() if self.currentVideoSource is not None else None
   
   def connect(self) -> bool:
+    with self.frameCondition:
+      self.frameBuffer.clear()
+      self.connected = False
+      self.running = True
     self.shouldRun = True
     self.preloadThread = threading.Thread(target=self._preloadFrames)
     self.preloadThread.start()
@@ -73,8 +93,35 @@ class ImageStream_Network(ImageStream):
 
   def disconnect(self):
     self.shouldRun = False
+    with self.frameCondition:
+      self.running = False
+      self.frameCondition.notify_all()
     if self.preloadThread and self.preloadThread.is_alive():
       self.preloadThread.join()
+
+  def getFrame(self, count:int, allowMix:bool = False) -> list[Frame] | None:
+    if count <= 0:
+      return []
+    with self.frameCondition:
+      if not self.frameBuffer or (not allowMix and len(self.frameBuffer) < count):
+        return None
+      available = min(count, len(self.frameBuffer))
+      return [self.frameBuffer.popleft() for _ in range(available)]
+
+  def awaitFrame(self, count:int, allowMix:bool = False) -> list[Frame] | None:
+    if count <= 0:
+      return []
+    deadline = time.monotonic() + self.waitTime
+    with self.frameCondition:
+      while self.shouldRun and len(self.frameBuffer) < count:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+          break
+        self.frameCondition.wait(remaining)
+      if not self.frameBuffer or (not allowMix and len(self.frameBuffer) < count):
+        return None
+      available = min(count, len(self.frameBuffer))
+      return [self.frameBuffer.popleft() for _ in range(available)]
 
 
 class ImageStream_File(ImageStream):
@@ -165,7 +212,6 @@ class StreamReader:
       self.stream = ImageStream_File(streamLink)
     else:
       self.stream = ImageStream_Network(streamLink)
-      raise Exception("Stream type not supported yet")
   
   def start(self) -> bool:
     return self.stream.connect()
@@ -183,3 +229,9 @@ class StreamReader:
     if len(frames) != frameCount:
       return None
     return frames
+
+  def getStreamInfo(self) -> dict[str, int | float | str]:
+    if isinstance(self.stream, ImageStream_Network):
+      with self.stream.frameCondition:
+        return self.stream.streamInfo.copy()
+    return {}
